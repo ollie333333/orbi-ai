@@ -1,303 +1,240 @@
-# ---------------------------
-# Orbi Assistant Installer with Pulsing Rainbow & Color Settings
-# ---------------------------
-mkdir -p ~/orbi-assistant/orbi && cd ~/orbi-assistant
+cat > orbi.py << 'EOF'
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-# ---------------------------
-# Create main.py
-# ---------------------------
-cat > orbi/main.py << 'EOF'
-import sys, os, shutil, subprocess, requests, colorsys
+import sys, os, subprocess, json
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
-    QLineEdit, QPushButton, QListWidget, QListWidgetItem,
-    QMessageBox, QComboBox
+    QApplication, QWidget, QVBoxLayout, QTextEdit, QLineEdit,
+    QPushButton, QHBoxLayout, QLabel, QListWidget, QColorDialog
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtGui import QTextCursor, QColor, QTextCharFormat, QFont
+from PySide6.QtCore import QTimer, Qt
 
-# ---------------------------
-# Ollama check
-# ---------------------------
-if shutil.which("ollama") is None:
-    print("Ollama not found. Installing via Homebrew...")
+DATA_FILE = "orbi_chats.json"
+OLLAMA_MODEL = "llama2:latest"
+PULSE_INTERVAL = 120
+MAX_CONTEXT = 10  # how many past messages to remember
+
+# ==========================
+# AI WITH MEMORY
+# ==========================
+def get_ai_response(prompt, history):
     try:
-        subprocess.run(["brew","install","ollama"], check=True)
-    except subprocess.CalledProcessError:
-        print("Failed to install Ollama. Install manually: https://ollama.com/download")
-        sys.exit(1)
+        # Build context from previous messages
+        context = ""
+        for msg in history[-MAX_CONTEXT:]:
+            context += msg + "\n"
 
-CHAT_DIR = "chats"
-MEMORY_FILE = "orbi_memory.txt"
+        full_prompt = context + "User: " + prompt + "\nOrbi:"
 
-# ---------------------------
-# Pulsing rainbow text
-# ---------------------------
-hue_offset = 0
-text_mode = "rainbow"  # default
+        result = subprocess.run(
+            ["ollama", "run", OLLAMA_MODEL, full_prompt],
+            capture_output=True, text=True, timeout=25
+        )
 
-def rainbow_html(text, hue_shift):
-    html=""
-    for i,c in enumerate(text):
-        hue=(i*40 + hue_shift)%360
-        html+=f'<span style="color:hsl({hue},100%,70%); font-weight:bold">{c}</span>'
-    return html
+        out = result.stdout.strip()
+        return out if out else "[No response]"
+    except Exception as e:
+        return f"[Error: {e}]"
 
-def color_text(text):
-    if text_mode=="rainbow":
-        return rainbow_html(text,hue_offset)
-    elif text_mode=="blue":
-        return f'<span style="color:#1E90FF; font-weight:bold">{text}</span>'
-    elif text_mode=="black":
-        return f'<span style="color:#000000; font-weight:bold">{text}</span>'
-    return text
+# ==========================
+# Storage
+# ==========================
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return []
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
 
-# ---------------------------
-# Llama3 runner
-# ---------------------------
-class LlamaThread(QThread):
-    finished = Signal()
-    def run(self):
-        try:
-            requests.get("http://127.0.0.1:11434")
-        except:
-            print("Starting Llama3 server...")
-            subprocess.Popen(["ollama","run","llama3"])
-            import time; time.sleep(5)
-        self.finished.emit()
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-# ---------------------------
-# Main App
-# ---------------------------
-class OrbiApp(QWidget):
+def summarize(text):
+    return text[:30] + ("..." if len(text) > 30 else "")
+
+# ==========================
+# App
+# ==========================
+class Orbi(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Orbi Assistant")
-        self.setGeometry(200,100,900,600)
-        self.setStyleSheet("background-color:#1e1e1e;")
-        if not os.path.exists(CHAT_DIR): os.makedirs(CHAT_DIR)
+        self.setWindowTitle("Orbi AI")
+        self.resize(800, 500)
 
-        main_layout = QHBoxLayout()
-        self.setLayout(main_layout)
-
-        # Chat list
-        self.chat_list = QListWidget(); self.chat_list.setFixedWidth(250)
-        self.chat_list.itemClicked.connect(self.load_chat)
-        main_layout.addWidget(self.chat_list)
-
-        # Chat area
-        chat_layout = QVBoxLayout()
-        main_layout.addLayout(chat_layout)
-
-        self.chat_display = QTextEdit(); self.chat_display.setReadOnly(True)
-        self.chat_display.setStyleSheet("background-color:#1e1e1e; color:#ffffff; padding:10px; border-radius:5px;")
-        chat_layout.addWidget(self.chat_display)
-
-        # Input line
-        self.input_line = QLineEdit(); self.input_line.setPlaceholderText("Ask Orbi...")
-        self.input_line.returnPressed.connect(self.send_message)
-        chat_layout.addWidget(self.input_line)
-
-        # Buttons
-        btn_layout = QHBoxLayout(); chat_layout.addLayout(btn_layout)
-        self.send_btn = QPushButton("Send"); self.send_btn.clicked.connect(self.send_message); btn_layout.addWidget(self.send_btn)
-        self.new_chat_btn = QPushButton("New Chat"); self.new_chat_btn.clicked.connect(self.new_chat); btn_layout.addWidget(self.new_chat_btn)
-        self.reset_ai_btn = QPushButton("Reset AI & Exit"); self.reset_ai_btn.clicked.connect(self.reset_ai); btn_layout.addWidget(self.reset_ai_btn)
-        self.reset_memory_btn = QPushButton("Reset Memory"); self.reset_memory_btn.clicked.connect(self.reset_memory); btn_layout.addWidget(self.reset_memory_btn)
-        self.settings_btn = QPushButton("Settings"); self.settings_btn.clicked.connect(self.open_settings); btn_layout.addWidget(self.settings_btn)
-
+        self.chats = load_data()
         self.current_chat = None
 
-        # Llama server
-        self.llama_thread = LlamaThread()
-        self.llama_thread.finished.connect(self.load_chat_list)
-        self.llama_thread.start()
+        self.text_color = QColor("white")
+        self.rainbow = False
+        self.rainbow_index = 0
+        self.colors = ["red","orange","yellow","green","blue","indigo","violet"]
 
-        # Timer for rainbow pulse
-        self.pulse_timer = QTimer()
-        self.pulse_timer.timeout.connect(self.update_pulse)
-        self.pulse_timer.start(100)  # 10 fps
+        self.init_ui()
+        self.refresh_chat_list()
+        self.start_pulse()
 
-    # ---------------------------
-    # Chat list & summary
-    # ---------------------------
-    def load_chat_list(self):
-        self.chat_list.clear()
-        if not os.path.exists(CHAT_DIR): os.makedirs(CHAT_DIR)
-        for filename in os.listdir(CHAT_DIR):
-            if filename.endswith(".txt"):
-                summary=self.get_chat_summary(os.path.join(CHAT_DIR,filename))
-                item=QListWidgetItem(summary); item.setData(Qt.UserRole,filename)
-                self.chat_list.addItem(item)
-        if self.chat_list.count()>0 and not self.current_chat:
-            self.chat_list.setCurrentRow(0); self.load_chat(self.chat_list.currentItem())
+        if not self.chats:
+            self.new_chat()
 
-    def get_chat_summary(self,filepath):
-        try:
-            with open(filepath,"r",encoding="utf-8") as f:
-                lines=[l.strip() for l in f if l.strip()]
-                return lines[-1][:50]+"…" if lines else "(Empty chat)"
-        except: return "(Error reading chat)"
+        self.input.setFocus()
 
-    def load_chat(self,item):
-        filename=item.data(Qt.UserRole); self.current_chat=filename
-        path=os.path.join(CHAT_DIR,filename)
-        self.chat_display.setHtml(open(path,"r",encoding="utf-8").read() if os.path.exists(path) else "")
+    def init_ui(self):
+        main = QHBoxLayout(self)
 
-    def save_history(self,text):
-        if not self.current_chat: return
-        with open(os.path.join(CHAT_DIR,self.current_chat),"a",encoding="utf-8") as f: f.write(text+"\n")
-        self.load_chat_list()
+        # Sidebar
+        side = QVBoxLayout()
+        self.chat_list = QListWidget()
+        self.chat_list.clicked.connect(self.load_chat)
+        side.addWidget(self.chat_list)
 
-    # ---------------------------
-    # Chat management
-    # ---------------------------
+        new_btn = QPushButton("+ New Chat")
+        new_btn.clicked.connect(self.new_chat)
+        side.addWidget(new_btn)
+
+        main.addLayout(side, 1)
+
+        # Chat area
+        layout = QVBoxLayout()
+
+        self.display = QTextEdit()
+        self.display.setReadOnly(True)
+        self.display.setFont(QFont("Consolas", 12))
+        layout.addWidget(self.display)
+
+        # Input
+        input_row = QHBoxLayout()
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Ask Orbi...")
+        self.input.returnPressed.connect(self.send)
+        input_row.addWidget(self.input)
+
+        send_btn = QPushButton("Send")
+        send_btn.clicked.connect(self.send)
+        input_row.addWidget(send_btn)
+
+        layout.addLayout(input_row)
+
+        # Controls
+        controls = QHBoxLayout()
+
+        color_btn = QPushButton("Color Wheel")
+        color_btn.clicked.connect(self.pick_color)
+        controls.addWidget(color_btn)
+
+        rainbow_btn = QPushButton("Rainbow Mode")
+        rainbow_btn.clicked.connect(self.toggle_rainbow)
+        controls.addWidget(rainbow_btn)
+
+        reset_btn = QPushButton("Reset AI")
+        reset_btn.clicked.connect(self.reset_all)
+        controls.addWidget(reset_btn)
+
+        layout.addLayout(controls)
+        main.addLayout(layout, 3)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.send()
+        else:
+            super().keyPressEvent(event)
+
+    # ==========================
+    # Chat logic
+    # ==========================
     def new_chat(self):
-        base="chat_"; idx=1
-        while os.path.exists(os.path.join(CHAT_DIR,f"{base}{idx}.txt")): idx+=1
-        self.current_chat=f"{base}{idx}.txt"; open(os.path.join(CHAT_DIR,self.current_chat),"w",encoding="utf-8").close()
-        self.load_chat_list(); self.chat_display.clear()
+        chat = {"title": "New Chat", "messages": []}
+        self.chats.insert(0, chat)
+        self.current_chat = chat
+        self.refresh_chat_list()
+        self.display.clear()
+        self.input.setFocus()
 
-    def reset_ai(self):
-        reply=QMessageBox.question(self,"Reset AI","Delete all chats/memory and exit?",QMessageBox.Yes|QMessageBox.No)
-        if reply==QMessageBox.Yes:
-            self.current_chat=None; self.chat_display.clear(); self.chat_list.clear()
-            if os.path.exists(CHAT_DIR):
-                for f in os.listdir(CHAT_DIR): os.remove(os.path.join(CHAT_DIR,f))
-            if os.path.exists(MEMORY_FILE): os.remove(MEMORY_FILE)
-            os.makedirs(CHAT_DIR,exist_ok=True); open(MEMORY_FILE,"w",encoding="utf-8").close()
-            QApplication.quit()
+    def load_chat(self):
+        index = self.chat_list.currentRow()
+        self.current_chat = self.chats[index]
+        self.display.clear()
+        for msg in self.current_chat["messages"]:
+            self.append(msg)
+        self.input.setFocus()
 
-    def reset_memory(self):
-        reply=QMessageBox.question(self,"Reset Memory","Delete Orbi's memory?",QMessageBox.Yes|QMessageBox.No)
-        if reply==QMessageBox.Yes:
-            if os.path.exists(MEMORY_FILE): os.remove(MEMORY_FILE)
-            open(MEMORY_FILE,"w",encoding="utf-8").close()
+    def refresh_chat_list(self):
+        self.chat_list.clear()
+        for c in self.chats:
+            self.chat_list.addItem(c["title"])
 
-    # ---------------------------
-    # Settings
-    # ---------------------------
-    def open_settings(self):
-        global text_mode
-        msg=QMessageBox()
-        msg.setWindowTitle("Select Text Color Mode")
-        combo=QComboBox(msg)
-        combo.addItems(["rainbow","blue","black"])
-        combo.setCurrentText(text_mode)
-        combo.move(20,40)
-        combo.show()
-        def apply_choice():
-            global text_mode
-            text_mode=combo.currentText()
-            msg.close()
-        ok_btn=QPushButton("Apply",msg)
-        ok_btn.move(20,70)
-        ok_btn.clicked.connect(apply_choice)
-        msg.setFixedSize(200,120)
-        msg.exec()
+    def send(self):
+        text = self.input.text().strip()
+        if not text:
+            return
 
-    # ---------------------------
-    # Message sending
-    # ---------------------------
-    def send_message(self):
-        if not self.current_chat: self.new_chat()
-        msg=self.input_line.text().strip()
-        if not msg: return
-        self.chat_display.append(color_text(f"You: {msg}")); self.save_history(f"You: {msg}")
-        response=self.ask_orbi(msg); self.chat_display.append(color_text(f"Orbi: {response}")); self.save_history(f"Orbi: {response}")
-        self.input_line.clear()
-        self.chat_display.verticalScrollBar().setValue(self.chat_display.verticalScrollBar().maximum())
+        if not self.current_chat:
+            self.new_chat()
 
-    def ask_orbi(self,prompt):
-        mem=""
-        if os.path.exists(MEMORY_FILE): mem=open(MEMORY_FILE,"r",encoding="utf-8").read()
-        full=f"{mem}\nYou are Orbi Assistant, a friendly AI like ChatGPT.\nUser: {prompt}"
-        try:
-            r=requests.post("http://127.0.0.1:11434/api/generate",json={"model":"llama3","prompt":full,"stream":False})
-            resp=r.json().get("response","Sorry, no response.")
-            with open(MEMORY_FILE,"a",encoding="utf-8") as f: f.write(f"User: {prompt}\nOrbi: {resp}\n")
-            return resp
-        except Exception as e: return f"Error: {e}"
+        self.input.clear()
+        self.append("You: " + text)
 
-    # ---------------------------
-    # Rainbow pulse update
-    # ---------------------------
-    def update_pulse(self):
-        global hue_offset
-        if text_mode=="rainbow":
-            hue_offset=(hue_offset+2)%360
-            cursor=self.chat_display.textCursor()
-            cursor.movePosition(cursor.Start)
-            plain=self.chat_display.toPlainText()
-            self.chat_display.setHtml(color_text(plain))
-            self.chat_display.verticalScrollBar().setValue(self.chat_display.verticalScrollBar().maximum())
+        history = self.current_chat["messages"]
+        reply = get_ai_response(text, history)
 
-def run():
-    app=QApplication(sys.argv); window=OrbiApp(); window.show(); sys.exit(app.exec())
+        self.append("Orbi: " + reply)
 
-if __name__=="__main__": run()
+        history.append("User: " + text)
+        history.append("Orbi: " + reply)
+
+        self.current_chat["title"] = summarize(text)
+
+        save_data(self.chats)
+        self.refresh_chat_list()
+
+        self.input.setFocus()
+
+    def append(self, text):
+        cursor = self.display.textCursor()
+        cursor.movePosition(QTextCursor.End)
+
+        fmt = QTextCharFormat()
+        fmt.setForeground(self.text_color)
+
+        cursor.insertText(text + "\n", fmt)
+
+    # ==========================
+    # UI Features
+    # ==========================
+    def pick_color(self):
+        color = QColorDialog.getColor()
+        if color.isValid():
+            self.text_color = color
+            self.rainbow = False
+
+    def toggle_rainbow(self):
+        self.rainbow = not self.rainbow
+
+    def start_pulse(self):
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.pulse)
+        self.timer.start(PULSE_INTERVAL)
+
+    def pulse(self):
+        if not self.rainbow:
+            return
+        self.text_color = QColor(self.colors[self.rainbow_index % len(self.colors)])
+        self.rainbow_index += 1
+
+    def reset_all(self):
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE)
+        self.chats = []
+        self.current_chat = None
+        self.display.clear()
+        self.refresh_chat_list()
+
+# ==========================
+# Run
+# ==========================
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    w = Orbi()
+    w.show()
+    sys.exit(app.exec())
 EOF
-
-# ---------------------------
-# setup.py
-# ---------------------------
-cat > setup.py << 'EOF'
-from setuptools import setup, find_packages
-
-setup(
-    name="orbi-assistant",
-    version="0.1.0",
-    packages=find_packages(),
-    include_package_data=True,
-    install_requires=[
-        "PySide6>=6.6",
-        "requests>=2.31"
-    ],
-    entry_points={
-        "console_scripts": [
-            "orbi=orbi.main:run"
-        ]
-    },
-    author="Ollie",
-    description="Orbi Assistant AI Chatbot GUI for macOS/Linux",
-    python_requires=">=3.11",
-)
-EOF
-
-# ---------------------------
-# requirements.txt
-# ---------------------------
-cat > requirements.txt << 'EOF'
-PySide6>=6.6
-requests>=2.31
-EOF
-
-# ---------------------------
-# LICENSE.md
-# ---------------------------
-cat > LICENSE.md << 'EOF'
-# Orbi Assistant License & Disclaimer
-
-Copyright (c) 2026 Ollie
-
-Permission is granted to use, copy, modify, distribute the Software, provided that:
-
-1. The Software is "as is", no warranty.
-2. The author is not responsible for any damages or content generated by the AI.
-3. Users must comply with third-party licenses (Ollama/Llama3).
-4. Do not remove this notice or claim ownership.
-
-Generated content belongs to the user.
-EOF
-
-# ---------------------------
-# __init__.py
-# ---------------------------
-touch orbi/__init__.py
-
-echo "✅ Orbi Assistant package with pulsing rainbow & settings created in ~/orbi-assistant"
-echo "Next steps:"
-echo "cd ~/orbi-assistant"
-echo "python3 -m venv venv"
-echo "source venv/bin/activate"
-echo "pip install ."
-echo "orbi"
