@@ -1,4 +1,4 @@
-cat > orbi.py << 'EOF'
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -237,4 +237,3 @@ if __name__ == "__main__":
     w = Orbi()
     w.show()
     sys.exit(app.exec())
-EOF
