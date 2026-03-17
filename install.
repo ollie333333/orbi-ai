@@ -6,3 +6,4 @@ pip install PySide6
 brew install ollama
 ollama pull llama2:latest
 python3 orbi.py
+ollama serve
